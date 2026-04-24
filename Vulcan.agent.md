@@ -209,11 +209,46 @@ _Attiva questa sezione quando il target rilevato è `[AWS]`._
 | Web Application | CloudFront + S3 + API Gateway + Lambda + RDS Aurora |
 | Real-time Analytics | Kinesis Data Streams + Lambda + DynamoDB + Athena |
 
-### Template e IaC [AWS]
+### Pattern Vincolanti [AWS]
 
-Boilerplate Lambda Function, Startup con DI, AWS CDK Stack (C#): vedi [`docs/vulcan-aws-templates.md`](docs/vulcan-aws-templates.md)
+#### Lambda
 
-Well-Architected Framework (5 pilastri): vedi [`docs/vulcan-aws-templates.md`](docs/vulcan-aws-templates.md)
+- Decoratori Powertools **obbligatori** su ogni `FunctionHandler`:
+  `[Logging(LogEvent = true, CorrelationIdPath = CorrelationIdPaths.ApiGatewayRest)]`
+  `[Tracing(CaptureMode = TracingCaptureMode.ResponseAndError)]`
+  `[Metrics(CaptureColdStart = true)]`
+- Client SDK (`IAmazonDynamoDB`, `IAmazonSQS`, ecc.) inizializzati nel **costruttore**, mai nell'handler — ottimizzazione cold start obbligatoria
+- DI via `ServiceCollection` + `BuildServiceProvider()` nel costruttore della Function class
+- SQS worker: return **sempre** `SQSBatchResponse` con `BatchItemFailures` (partial batch response) — mai `void` o `bool`
+
+#### DynamoDB
+
+- Usare sempre `DynamoDBContext` (Object Persistence Model), non low-level `PutItemAsync`
+- Entità con `[DynamoDBVersion] int? Version` per concorrenza ottimistica
+- `[DynamoDBHashKey]` + `[DynamoDBRangeKey]` espliciti, `[DynamoDBTable("NomeTabella")]` sulla classe
+
+#### CDK Stack
+
+- `BillingMode.PAY_PER_REQUEST`, `PointInTimeRecovery = true`, `TableEncryption.AWS_MANAGED`, `RemovalPolicy.RETAIN` su ogni Table
+- DLQ con `MaxReceiveCount = 3`; Queue con `VisibilityTimeout = Duration.Seconds(300)`; `QueueEncryption.KMS_MANAGED`
+- Lambda: `Tracing = Tracing.ACTIVE`, `LogRetention = RetentionDays.ONE_MONTH`, `DeadLetterQueue = dlq`
+- `SqsEventSource` con `ReportBatchItemFailures = true`
+- IAM: policy custom con azioni esplicite (es. `dynamodb:GetItem`, `dynamodb:PutItem`) — mai `dynamodb:*` o policy managed generiche
+
+#### Polly (resilienza)
+
+- Retry exponential backoff con jitter: `TimeSpan.FromSeconds(Math.Pow(2, attempt)) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100))`
+- Circuit breaker: 5 eventi → break 30 secondi
+
+#### Well-Architected — Vincoli Operativi
+
+- **Operational Excellence**: IaC always (CDK o SAM), logging JSON strutturato verso CloudWatch, X-Ray abilitato
+- **Security**: IAM least privilege, Secrets Manager per segreti (no env var per credenziali), KMS at-rest, CloudTrail audit
+- **Reliability**: DLQ su ogni Lambda e SQS consumer, `ReportBatchItemFailures`, Multi-AZ su tutti i managed service
+- **Performance**: client SDK fuori dall'handler, DynamoDB query (non scan), memory sizing documentato
+- **Cost**: DynamoDB on-demand per carichi variabili; tag obbligatori `Environment`, `Project`, `ManagedBy`
+
+_Boilerplate completo e template IaC: [`vulcan/docs/vulcan-aws-templates.md`](vulcan/docs/vulcan-aws-templates.md)_
 
 ### Output Aggiuntivo [AWS]
 
@@ -409,11 +444,51 @@ await searchClient.IndexDocumentsAsync(
 | Web Application | App Service + SQL Database + Blob Storage + Redis Cache + CDN |
 | AI Search | Azure OpenAI + AI Search + Functions + Cosmos DB |
 
-### Template e IaC [Azure]
+### Pattern Vincolanti [Azure]
 
-Boilerplate Azure Function + Startup con tutti i servizi: vedi [`docs/vulcan-azure-templates.md`](docs/vulcan-azure-templates.md)
+#### Azure Functions
 
-Best Practices Azure (costi, performance, affidabilità, sicurezza): vedi [`docs/vulcan-azure-templates.md`](docs/vulcan-azure-templates.md)
+- Modello **Isolated Worker** sempre (non in-process legacy)
+- `Program.cs` con `HostBuilder` + `ConfigureFunctionsWorkerDefaults()` + `ConfigureServices()`
+- Serilog → `WriteTo.ApplicationInsights(connectionString, new TraceTelemetryConverter())`
+
+#### Azure Identity & Client
+
+- `AddAzureClients` con **un solo** `clientBuilder.UseCredential(new DefaultAzureCredential())` — non istanziare credential separate per ogni client
+- Sviluppo: `DefaultAzureCredential`; produzione: `ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(...))`
+- Tutti i secret in Key Vault; `appsettings.json` non deve contenere connection strings o chiavi in produzione
+
+#### Cosmos DB
+
+- `CosmosClient` **singleton** con `ConnectionMode.Direct` e `MaxRetryAttemptsOnRateLimitedRequests = 9`
+- Query sempre parametrizzate: `new QueryDefinition("... WHERE c.field = @param").WithParameter("@param", value)` — mai string interpolation con dati utente
+- Upsert con ottimistic concurrency: `new ItemRequestOptions { IfMatchEtag = item.ETag }`
+- Delete come **soft delete** via `PatchOperation.Set("/deleted", true)` + `PatchOperation.Set("/deletedAt", DateTime.UtcNow)` — mai `DeleteItemAsync` direttamente su entità business
+
+#### Service Bus
+
+- `ServiceBusClient` singleton, `ServiceBusSender` creato al bisogno
+- Batch con `TryAddMessage`: se il messaggio non entra nel batch, inviarlo singolarmente prima di procedere
+- `ServiceBusSender` implementa `IAsyncDisposable` — sempre `await sender.DisposeAsync()`
+- `CorrelationId = Activity.Current?.TraceId.ToString()` su ogni messaggio inviato
+
+#### Bicep IaC
+
+- Role assignments con GUID deterministico: `guid(resource.id, identity.id, roleDefinitionId)`
+- Key Vault: `enableRbacAuthorization: true` (no access policies legacy), `enableSoftDelete: true`, `enablePurgeProtection: environment == 'prod'`
+- Function App: `httpsOnly: true`, `minTlsVersion: '1.2'`, `ftpsState: 'Disabled'`, `http20Enabled: true`
+- App Service Plan: `Y1/Dynamic` per dev/staging, `EP1/ElasticPremium` per prod
+- Linux Function App: `reserved: true` nel plan, `linuxFxVersion: 'DOTNET-ISOLATED|8.0'`
+- `AZURE_CLIENT_ID` sempre in appSettings della Function App (per Managed Identity user-assigned)
+
+#### Azure Best Practices — Vincoli Operativi
+
+- **Costi**: Consumption Plan per dev (pay-per-execution); Cosmos DB autoscale RU/s; Log Analytics retention 30gg dev / 90gg prod; tag obbligatori `Environment`, `Project`, `ManagedBy`
+- **Performance**: `CosmosClient` singleton (mai scoped); `IHttpClientFactory` per HttpClient; partition key ad alta cardinalità; query sempre filtrate su partition key
+- **Affidabilità**: retry policy in `host.json` (`exponentialBackoff`, max 3); DLQ monitorata; deployment slots staging→prod; backup continuo su Cosmos DB in prod
+- **Sicurezza**: Managed Identity user-assigned; no connection strings hardcoded; RBAC least privilege; private endpoints per Cosmos DB e Service Bus in prod; `allowBlobPublicAccess: false`
+
+_Boilerplate completo e template IaC: [`vulcan/docs/vulcan-azure-templates.md`](vulcan/docs/vulcan-azure-templates.md)_
 
 ### Output Aggiuntivo [Azure]
 
