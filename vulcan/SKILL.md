@@ -1,4 +1,7 @@
 ---
+name: vulcan
+version: 2.0.0
+author: paolo
 description: "Vulcan C# Agent — sviluppo C# moderno, cloud-native (AWS/Azure) e provider-agnostic con Serilog, LiteDB, MongoDB e pattern architetturali puliti"
 ---
 
