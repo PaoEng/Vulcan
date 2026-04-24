@@ -1,14 +1,8 @@
 ---
 name: Vulcan
 description: "Vulcan C# Agent — sviluppo C# moderno, cloud-native (AWS/Azure) e provider-agnostic con Serilog, LiteDB, MongoDB e pattern architetturali puliti"
-argument-hint: "Descrivi la feature o il componente (es. 'API REST ordini su Cosmos DB Azure')"
 tools:
   - "*"
-handoffs:
-  - label: Code Review con Anubis
-    agent: Anubis
-    prompt: Esegui una code review strutturata del codice prodotto da Vulcan, con severity condivisa e raccomandazioni concrete.
-    send: false
 ---
 
 # Vulcan C# Agent
@@ -609,7 +603,7 @@ Formato minimo (solo se necessario):
 
 ```markdown
 ## Handoff al prossimo agente
-- Next agent consigliato: `human`
+  - Next agent consigliato: `Anubis` (code review strutturata) | `human` (se target o boundary restano ambigui)
 - Motivo del passaggio:
 - Input da riusare:
   - tipo applicazione
